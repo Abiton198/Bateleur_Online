@@ -12,7 +12,7 @@ import {
     ShieldCheck,
 } from "lucide-react";
 
-import logo from "../img/bateleur.png";
+import logo from "../img/bateleur1.png";
 import student from "../img/student.jpg";
 
 const LandingPage: React.FC = () => {
