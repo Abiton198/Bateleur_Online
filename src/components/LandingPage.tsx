@@ -59,7 +59,7 @@ const LandingPage: React.FC = () => {
                             onClick={() => navigate("/login")}
                             className="border border-[#173641] text-[#173641] hover:bg-[#173641] hover:text-white transition px-6 py-3 rounded-xl font-semibold"
                         >
-                            Student Login
+                            Enroll Now
                         </button>
                     </div>
                 </div>
@@ -84,7 +84,7 @@ const LandingPage: React.FC = () => {
                             onClick={() => navigate("/login")}
                             className="bg-[#E7AA42] hover:bg-[#d89a34] text-white px-6 py-3 rounded-full font-bold animate-pulse shadow-lg transition"
                         >
-                            Enrol Now
+                            Portal Access
                         </button>
                     </div>
 
