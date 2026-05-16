@@ -436,7 +436,7 @@ export default function LoginForm() {
             <X size={20} />
           </button>
 
-          <CardTitle className="text-4xl font-black">BATELUER ONLINE</CardTitle>
+          <CardTitle className="text-4xl font-black">BATELEUR ONLINE</CardTitle>
           <CardDescription className="text-indigo-100">Academy Portal</CardDescription>
         </CardHeader>
 
