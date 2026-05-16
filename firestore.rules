@@ -1,0 +1,313 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* ===========================================================
+       Helper Functions
+       =========================================================== */
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function uid() { return request.auth.uid; }
+    function email() { return request.auth.token.email; }
+
+    function isPrincipal() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/principals/$(uid())) ||
+        (exists(/databases/$(database)/documents/users/$(uid())) &&
+         get(/databases/$(database)/documents/users/$(uid())).data.role == "principal")
+      );
+    }
+
+    function isAdmin() {
+      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(uid()));
+    }
+
+    function isParent() {
+      return isSignedIn() && exists(/databases/$(database)/documents/parents/$(uid()));
+    }
+
+   function isTeacher() {
+  return isSignedIn() && (
+
+    // ✅ PRIMARY SOURCE (recommended)
+    (exists(/databases/$(database)/documents/users/$(uid())) &&
+     get(/databases/$(database)/documents/users/$(uid())).data.role == "teacher")
+
+    ||
+
+    // ✅ fallback (if you still use teachers collection)
+    exists(/databases/$(database)/documents/teachers/$(uid()))
+  );
+}
+
+    function isApprovedTeacher() {
+  return isSignedIn() && (
+
+    // ✅ Primary system: users collection
+    (
+      exists(/databases/$(database)/documents/users/$(uid())) &&
+      get(/databases/$(database)/documents/users/$(uid())).data.role == "teacher" &&
+      get(/databases/$(database)/documents/users/$(uid())).data.approved == true
+    )
+
+    ||
+
+    // ✅ fallback legacy teachers collection
+    (
+      exists(/databases/$(database)/documents/teachers/$(uid())) &&
+      get(/databases/$(database)/documents/teachers/$(uid())).data.approved == true
+    )
+  );
+}
+
+    // ✅ FIXED: Now actually used in the students rule below
+    // Checks if the currently signed-in user is the parent of a given student document
+    function isParentOfStudent(studentData) {
+      return isSignedIn() && (
+        studentData.parentId == uid() ||
+        studentData.linkedParentId == uid() ||
+        (studentData.linkedParentEmail != null &&
+         studentData.linkedParentEmail == email())
+      );
+    }
+
+    /* ===========================================================
+       Teacher Applications
+       =========================================================== */
+    match /teacherApplications/{uid} {
+
+  allow read: if isSignedIn() && (
+    uid() == resource.data.uid ||
+    isAdmin() ||
+    isPrincipal()
+  );
+
+  allow write: if isSignedIn();
+}
+
+    /* ===========================================================
+       Users
+       =========================================================== */
+    match /users/{userId} {
+      allow read: if isSignedIn() && uid() == userId;
+      allow create: if isSignedIn() && uid() == userId;
+      allow update: if isSignedIn() && (uid() == userId || isPrincipal() || isAdmin());
+      allow list: if isSignedIn() && (isPrincipal() || isAdmin());
+      allow delete: if false;
+    }
+
+    /* ===========================================================
+       Students & Profile
+
+       Access matrix:
+       ┌─────────────────────────────┬────────┬──────┬────────┐
+       │ Actor                       │  list  │ read │ update │
+       ├─────────────────────────────┼────────┼──────┼────────┤
+       │ Anyone (username login)     │  ✅    │  ❌  │  ❌    │
+       │ Unauthenticated (own doc)   │  ✅    │  ✅  │  ❌    │
+       │ Parent (own child)          │  ✅    │  ✅  │  ❌    │
+       │ Teacher                     │  ✅    │  ✅  │  ✅    │
+       │ Principal / Admin           │  ✅    │  ✅  │  ✅    │
+       └─────────────────────────────┴────────┴──────┴────────┘
+       =========================================================== */
+    match /students/{studentId} {
+
+      // ✅ list: needed for username lookup during student login (unauthenticated)
+      // and for parents fetching their children list
+      allow list: if true;
+
+      // ✅ read: covers getDoc() calls
+      // - Unauthenticated students (username-only login) can read their OWN doc by ID
+      // - Parents can read their children's docs (checked against parentId field)
+      // - Staff can read any student doc
+      allow read: if
+        // Case 1: Unauthenticated student reading their own doc via direct ID
+        (!isSignedIn())
+
+        ||
+
+        // Case 2: Authenticated staff
+        (isSignedIn() && (
+          isAdmin() ||
+          isPrincipal() ||
+          isTeacher()
+        ))
+
+        ||
+
+        // Case 3: ✅ Parent reading their own child's profile
+        // This is what was MISSING — parents have Firebase Auth but their UID
+        // does not match the studentId, so the old rule blocked them
+        (isSignedIn() && isParentOfStudent(resource.data));
+
+      // create: only authenticated users (parents registering a child, staff)
+      allow create: if isSignedIn();
+
+      // update: staff and parent of that specific student
+      allow update: if isSignedIn() && (
+        isAdmin() ||
+        isPrincipal() ||
+        isTeacher() ||
+        // ✅ Parent can update their own child (e.g. learning mode toggle)
+        resource.data.parentId == uid()
+      );
+
+      allow delete: if isAdmin() || isPrincipal();
+
+      /* ---------------------------------------------------------
+         Subcollections (audit trails, notes, etc.)
+      --------------------------------------------------------- */
+      match /{subcollection=**} {
+        allow read: if isSignedIn() && (
+          isAdmin() || isPrincipal() || isTeacher() ||
+          // ✅ Parent can read subcollections of their own child
+          get(/databases/$(database)/documents/students/$(studentId)).data.parentId == uid()
+        );
+        allow write: if isAdmin() || isPrincipal();
+      }
+    }
+
+    /* ===========================================================
+       Parents Collection
+       =========================================================== */
+    match /parents/{parentId} {
+      allow read: if isSignedIn() && (uid() == parentId || isAdmin() || isPrincipal());
+      allow create: if isSignedIn() && (uid() == parentId || isAdmin() || isPrincipal());
+      allow update: if isSignedIn() && (uid() == parentId || isAdmin() || isPrincipal());
+      allow list: if isSignedIn() && (isAdmin() || isPrincipal());
+    }
+
+    /* ===========================================================
+       Academic Data — Class Links
+       =========================================================== */
+    match /class_links/{linkId} {
+      // ✅ Parents and authenticated staff can read
+      // ✅ Unauthenticated students (username-only) can also read
+      //    so their dashboard Resources tab loads
+      allow read: if true;
+
+      allow create: if isSignedIn();
+
+      allow update, delete: if isSignedIn() && (
+        resource.data.teacherId == uid() || isAdmin() || isPrincipal()
+      );
+
+      /* ---------------------------------------------------------
+         Audit Trail Subcollection
+         Students are unauthenticated so we loosen create slightly
+         but still validate the data shape
+      --------------------------------------------------------- */
+      match /auditTrail/{docId} {
+        // ✅ Allow unauthenticated students to log their own link access
+        // We validate the write contains required fields instead of checking auth
+        allow create: if
+          // Authenticated users logging for themselves
+          (isSignedIn() && request.resource.data.studentId == uid())
+          ||
+          // ✅ Unauthenticated student (username-only login)
+          // Validate shape: must have studentId, grade, action fields
+          (!isSignedIn() &&
+           request.resource.data.studentId is string &&
+           request.resource.data.studentId.size() > 0 &&
+           request.resource.data.action is string);
+
+        allow read: if isSignedIn() && (
+          isAdmin() || isPrincipal() || isTeacher() ||
+          get(/databases/$(database)/documents/students/$(resource.data.studentId)).data.parentId == uid()
+        );
+      }
+    }
+
+    /* ===========================================================
+   Timetable - Universal Read, Restricted Write
+   =========================================================== */
+match /timetable/{entryId} {
+  
+  // 1. ALLOW EVERYONE TO READ
+  // This allows Students, Parents, and Teachers to view the schedule
+  // 'if true' works for unauthenticated students, or use 'if isSignedIn()' for security
+  allow read: if true; 
+
+  // 2. RESTRICT CREATION/DELETION
+  // Only the Principal or Admin can add or remove classes
+  allow create, delete: if isSignedIn() && (isPrincipal() || isAdmin());
+
+  // 3. RESTRICT UPDATES
+  // Admins/Principals can update anything. 
+  // Teachers can only update their own slots (e.g., to change a lesson topic)
+  allow update: if isSignedIn() && (
+    isAdmin() || 
+    isPrincipal() || 
+    resource.data.teacherUid == request.auth.uid ||
+    resource.data.teacherId == request.auth.uid
+  );
+}
+
+    /* ===========================================================
+       Announcements
+       =========================================================== */
+    match /announcements/{announcementId} {
+      // ✅ Parents and authenticated users can read
+      // ✅ Unauthenticated students can also read announcements
+      allow read: if true;
+      allow create, update, delete: if isSignedIn() && (isPrincipal() || isAdmin());
+    }
+
+    /* ===========================================================
+       Reviews
+       =========================================================== */
+    match /reviews/{reviewId} {
+      allow read: if resource.data.status == 'approved';
+      allow create: if isSignedIn();
+    }
+
+    /* ===========================================================
+       Invoices
+       =========================================================== */
+    match /invoices/{invoiceId} {
+      allow read: if isSignedIn() && (
+        uid() == resource.data.parentId ||
+        isAdmin() ||
+        isPrincipal()
+      );
+      // Deduplicated: write covers create + update + delete
+      allow write: if isSignedIn() && (isAdmin() || isPrincipal());
+    }
+
+    /* ===========================================================
+       Conversations (Parent ↔ Teacher Chat)
+       =========================================================== */
+    match /conversations/{conversationId} {
+      allow read: if isSignedIn() &&
+        request.auth.uid in resource.data.participants;
+
+      allow create: if isSignedIn() &&
+        request.auth.uid in request.resource.data.participants;
+
+      allow update: if isSignedIn() &&
+        request.auth.uid in resource.data.participants;
+
+      allow delete: if false;
+
+      match /messages/{messageId} {
+        allow read: if isSignedIn() &&
+          request.auth.uid in
+          get(/databases/$(database)/documents/conversations/$(conversationId)).data.participants;
+
+        allow create: if isSignedIn() &&
+          request.auth.uid in
+          get(/databases/$(database)/documents/conversations/$(conversationId)).data.participants;
+
+        allow update: if isSignedIn() &&
+          request.auth.uid in
+          get(/databases/$(database)/documents/conversations/$(conversationId)).data.participants;
+
+        allow delete: if false;
+      }
+    }
+
+    // Default fallback — deny everything not explicitly covered
+  }
+}

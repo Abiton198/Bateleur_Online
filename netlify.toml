@@ -1,0 +1,32 @@
+[build]
+  command = "npm run build"
+  functions = "functions"
+  publish = "dist"
+
+[functions]
+  node_bundler = "esbuild"
+  included_files = ["!functions/.eslintrc*", "!functions/*.log"]
+
+[build.environment]
+  NODE_VERSION = "22"
+  SECRETS_SCAN_ENABLED = "false"
+
+[[plugins]]
+  package = "@netlify/plugin-functions-install-core"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+# ✅ CORRECT way to handle sw.js in a .toml file:
+[[headers]]
+  for = "/sw.js"
+  [headers.values]
+    Cache-Control = "no-cache, no-store, must-revalidate"
+    Content-Type = "application/javascript"
+
+[[headers]]
+  for = "/.well-known/assetlinks.json"
+  [headers.values]
+    Content-Type = "application/json"

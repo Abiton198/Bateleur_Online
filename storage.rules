@@ -1,0 +1,28 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Existing student registrations
+    match /registrations/{studentId}/documents/{fileName} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.token.role == "principal";
+    }
+
+    // Teacher applications
+    match /teacherApplications/{uid}/{applicationId}/{docType}/{fileName} {
+      // Teacher can upload their own documents
+      allow write: if request.auth != null && request.auth.uid == uid;
+
+      // Principal can read ALL teacher documents for review
+      allow read: if request.auth != null && request.auth.token.role == "principal";
+
+      // Optional: Teacher can also read their own (for future edits)
+      allow read: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // Deny everything else
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

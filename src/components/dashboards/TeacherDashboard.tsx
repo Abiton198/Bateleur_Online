@@ -1,0 +1,1338 @@
+"use client";
+
+import React, { useEffect, useState, useRef, useMemo } from "react";
+import { db } from "@/lib/firebaseConfig";
+import {
+  collection,
+  onSnapshot,
+  query,
+  where,
+  doc,
+  updateDoc,
+  serverTimestamp,
+  getDocs,
+  getDoc,
+  orderBy,
+  addDoc,
+  setDoc,
+  deleteDoc,
+} from "firebase/firestore";
+import { getAuth, onAuthStateChanged, signOut, User } from "firebase/auth";
+import { useNavigate } from "react-router-dom";
+import MoodleCard from "./MoodleCard";
+import { exportTeacherTimetablePDF, TimetableExportManager } from "@/lib/exportTimetable";
+import { Download } from "lucide-react";
+
+
+/* UI Components */
+import { Button } from "@/components/ui/button";
+import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import NextClassCountdownCard from "@/lib/NextClassCountdownCard";
+
+
+/* Icons */
+import {
+  Loader2, LogOut, Edit2, Save, ExternalLink, Video, Check, X,
+  Sparkles, BookOpen, Send, MessageCircle, Users, PlusCircle, Trash2, Settings, VideoOff, Mic, MicOff,
+  Clock
+} from "lucide-react";
+/* Signaling Logic (WebRTC) */
+
+import { useAuth } from "../auth/AuthProvider";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+// 1. Unified Firestore Sync Function (Using setDoc to prevent "Missing Document" errors)
+import { arrayUnion, arrayRemove } from "firebase/firestore";
+import logo from "@/img/care.png";
+
+
+
+
+
+
+/* =====================================================
+   TYPES & INTERFACES
+====================================================== */
+interface TeacherProfile {
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+  phone?: string;
+  bio?: string;
+  subjects?: { name: string; curriculum: string }[];
+  status?: "pending" | "approved" | "rejected";
+}
+
+interface TeacherUser {
+  uid: string;
+  email: string;
+  personalInfo?: {
+    firstName?: string;
+    lastName?: string;
+  };
+  firstName?: string;
+  lastName?: string;
+  teacherName?: string;
+}
+
+interface TimetableSlot {
+  id: string;
+  day: string;
+  time: string;
+  subject: string;
+  grade: string;
+  curriculum: string;
+  teacherUid: string;
+  teacherName: string;
+}
+
+interface Student {
+  id: string;
+  firstName: string;
+  lastName: string;
+  parentId: string;
+  linkedParentId?: string;
+  subjects: string[];
+  grade?: string;
+}
+
+interface ClassLink {
+  id: string;
+  title: string;
+  url: string;
+  type: string;        // e.g., "classroom", "resource", "zoom"
+  grade: string;       // e.g., "Primary", "A-Level", or "all"
+  teacherId: string;   // The UID of the teacher
+  teacherName: string; // The flattened name (e.g., "Adel Tops")
+  createdAt: any;      // Firestore Timestamp
+  updatedAt?: any;     // Firestore Timestamp
+  status: "active" | "archived"; // For soft deletion and audit trail
+  targetGrade: string; // e.g., "Primary", "A-Level", or "all"
+}
+
+interface Conversation {
+  id: string;
+  participants: string[];
+  subject: string;
+  lastMessage: string;
+  lastMessageTime: any;
+  studentId: string;
+}
+
+interface Message {
+  id: string;
+  text: string;
+  sender: string;
+  timestamp: any;
+}
+
+interface AuditLog {
+  id: string;
+  studentId: string;
+  studentName: string;
+  grade: string;
+  subject: string;
+  linkType: string;
+  clickedAt?: Timestamp; // optional because it may not exist yet
+}
+
+const British_Curriculum_SUBJECTS = [
+  /* Primary Curriculum */
+  "English (Primary)",
+  "Mathematics (Primary)",
+  "Science (Primary)",
+  "Computing (Primary)",
+  "Geography (Primary)",
+  "History (Primary)",
+  "Art & Design (Primary)",
+  "Design & Technology (Primary)",
+  "Music (Primary)",
+  "Physical Education (Primary)",
+  "Religious Education (Primary)",
+  "PSHE (Primary)",
+
+  /* IGCSE */
+  "Mathematics (IGCSE)",
+  "Physics (IGCSE)",
+  "Chemistry (IGCSE)",
+  "Biology (IGCSE)",
+  "Computer Science (IGCSE)",
+  "English Language (IGCSE)",
+  "Business Studies (IGCSE)",
+  "Economics (IGCSE)",
+  "Geography (IGCSE)",
+  "History (IGCSE)",
+  "Coding (IGCSE)",
+
+  /* A-Level */
+  "Mathematics (A-Level)",
+  "Further Mathematics (A-Level)",
+  "Physics (A-Level)",
+  "Chemistry (A-Level)",
+  "Biology (A-Level)",
+  "Computer Science (A-Level)",
+  "English Literature (A-Level)",
+  "Business Studies (A-Level)",
+  "Economics (A-Level)",
+  "Geography (A-Level)",
+  "History (A-Level)",
+
+  /* Extras */
+  "Bible Study (All Grades)"
+];
+
+const formatTimestamp = (timestamp: any) => {
+  if (!timestamp?.toDate) return "—";
+
+  const date = timestamp.toDate();
+
+  return new Intl.DateTimeFormat("en-ZA", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+};
+
+const TeacherDashboard: React.FC = () => {
+  const navigate = useNavigate();
+  const auth = getAuth();
+
+  // Core State
+  const [user, setUser] = useState<User | null>(null);
+  const [profile, setProfile] = useState<TeacherProfile | null>(null);
+  const [students, setStudents] = useState<Student[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [timetable, setTimetable] = useState<TimetableSlot[]>([]);       // teacher's own slots
+const [allTimetable, setAllTimetable] = useState<TimetableSlot[]>([]);  // full school (for master view)
+
+  // Resources / Links State
+  const [resources, setResources] = useState<ClassLink[]>([]);
+  const [availableGrades, setAvailableGrades] = useState<string[]>([]);
+  const [selectedGradeFilter, setSelectedGradeFilter] = useState<string>("all");
+  const [editingResourceId, setEditingResourceId] = useState<string | null>(null);
+  const [editResourceData, setEditResourceData] = useState<any>(null);
+  const [newResource, setNewResource] = useState({
+    title: "",
+    url: "",
+    type: "classroom",
+    targetGrade: "all"
+  });
+
+  // Profile Edit State
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
+  const [editProfile, setEditProfile] = useState<Partial<TeacherProfile>>({});
+
+
+  // Chat State
+  const [chatOpen, setChatOpen] = useState(false);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConvId, setActiveConvId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [newMessage, setNewMessage] = useState("");
+  const [totalUnread, setTotalUnread] = useState(0);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Derived State
+  const [status, setStatus] = useState<string | null>(null);
+  const [selectValue, setSelectValue] = useState("");
+
+
+
+
+  /* ======================================================
+     NEW: LIVE SESSION STATE
+  ====================================================== */
+
+  const teacher = user as unknown as TeacherUser;
+  const [applicationDocId, setApplicationDocId] = useState<string | null>(null);
+  const [selectedResource, setSelectedResource] = useState<any>(null);
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+
+
+
+
+  const { logoutAll } = useAuth();
+
+  const teacherFullName = useMemo(() => {
+    if (!profile) return "";
+
+    const first = profile.firstName?.trim();
+    const last = profile.lastName?.trim();
+
+    return [first, last].filter(Boolean).join(" ");
+  }, [profile]);
+  const writeTimeout = useRef<any>(null);
+
+
+
+
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (u) => { u ? setUser(u) : navigate("/"); });
+    return () => unsub();
+  }, [auth, navigate]);
+
+
+
+
+  // This effect is to keep the "current time" updated for any time-based UI elements (like the session timer)
+  const [now, setNow] = React.useState(new Date());
+
+  React.useEffect(() => {
+    const interval = setInterval(() => {
+      setNow(new Date());
+    }, 60 * 1000); // update every minute
+
+    return () => clearInterval(interval);
+  }, []);
+
+
+  useEffect(() => {
+    if (!user?.uid) return;
+
+    // console.log("🔍 Resolving teacher application by UID:", user.uid);
+    setLoading(true);
+
+    const q = query(
+      collection(db, "teacherApplications"),
+      where("uid", "==", user.uid)
+    );
+
+    const unsub = onSnapshot(q, (snap) => {
+      if (snap.empty) {
+        console.warn("⚠️ No teacher application found for UID");
+        setLoading(false);
+        return;
+      }
+
+      // ✅ Use the MOST COMPLETE document
+      const docSnap =
+        snap.docs.find(d => d.data()?.personalInfo?.firstName) ?? snap.docs[0];
+
+      const data = docSnap.data();
+      const p = data.personalInfo ?? {};
+
+      console.log("📄 Using application doc:", docSnap.id);
+      console.log("👤 Raw personalInfo:", p);
+
+      const firstName = p.firstName ?? "Teacher";
+      const lastName = p.lastName ?? "";
+
+      console.log("✅ Resolved name:", firstName, lastName);
+
+      setProfile({
+        firstName,
+        lastName,
+        email: p.email ?? data.email ?? "",
+        phone: p.phone ?? "",
+        bio: p.bio ?? "",
+        subjects: data.subjects ?? p.subjects ?? [],
+        status: data.status ?? "pending",
+      });
+
+      setEditProfile({
+        phone: p.phone ?? "",
+        bio: p.bio ?? "",
+      });
+
+      setLoading(false);
+    });
+
+    return () => unsub();
+  }, [user?.uid]);
+
+
+  // Audit Trail Logic: When a resource is clicked, we open a modal and listen to its auditTrail sub-collection in real-time
+  const openAuditModal = async (resource: any) => {
+    setSelectedResource(resource);
+
+    const q = collection(db, "class_links", resource.id, "auditTrail");
+
+    onSnapshot(q, (snapshot) => {
+      const logs: AuditLog[] = snapshot.docs.map(doc => {
+        const data = doc.data();
+
+        return {
+          id: doc.id,
+          studentId: data.studentId,
+          studentName: data.studentName,
+          grade: data.grade,
+          subject: data.subject,
+          linkType: data.linkType,
+          clickedAt: data.clickedAt,
+        };
+      });
+
+      setAuditLogs(
+        logs.sort((a, b) =>
+          (b.clickedAt?.seconds || 0) -
+          (a.clickedAt?.seconds || 0)
+        )
+      );
+    });
+  };
+
+
+  /* ======================================================
+     2. SYNC TIMETABLE, STUDENTS & GRADES
+  ===================================================== */
+ useEffect(() => {
+  if (!teacherFullName || !profile?.subjects) return;
+
+  // Teacher's own slots — used for personal schedule, student matching, etc.
+  const qTime = query(
+    collection(db, "timetable"),
+    where("teacherName", "==", teacherFullName)
+  );
+  const unsubTime = onSnapshot(qTime, (snap) => {
+    setTimetable(snap.docs.map(d => ({ id: d.id, ...d.data() } as TimetableSlot)));
+  });
+
+  // ALL school slots — used only for master timetable view in TimetableExportManager
+  const unsubAll = onSnapshot(collection(db, "timetable"), (snap) => {
+    setAllTimetable(snap.docs.map(d => ({ id: d.id, ...d.data() } as TimetableSlot)));
+  });
+
+  const subjectNames = profile.subjects.map(s => s.name);
+  const qStud = query(
+    collection(db, "students"),
+    where("subjects", "array-contains-any", subjectNames)
+  );
+  const unsubStud = onSnapshot(qStud, (snap) => {
+    const studentList = snap.docs.map(d => ({ id: d.id, ...d.data() } as Student));
+    setStudents(studentList);
+    const grades = new Set<string>();
+    studentList.forEach(s => { if (s.grade) grades.add(s.grade); });
+    setAvailableGrades(Array.from(grades).sort());
+  });
+
+  return () => { unsubTime(); unsubAll(); unsubStud(); };
+}, [teacherFullName, profile?.subjects]);
+
+  /* ======================================================
+     3. RESOURCE ENGINE (CRUD & AUDIT TRAIL)
+  ===================================================== */
+
+  // UPDATE: Refined handleUpdateResource
+
+  const handleAddResource = async () => {
+    if (!newResource.title || !newResource.url) return alert("Title and URL are required");
+
+    // Use the direct Auth UID to ensure it matches 'uid()' in rules
+    const currentUid = auth.currentUser?.uid;
+    if (!currentUid) return alert("You must be logged in.");
+
+    const firstName = user?.personalInfo?.firstName || user?.firstName || "";
+    const lastName = user?.personalInfo?.lastName || user?.lastName || "";
+    const finalName = `${firstName} ${lastName}`.trim() || "Teacher";
+
+    try {
+      // This write matches 'match /class_links/{linkId}' + 'allow create: if isSignedIn()'
+      await addDoc(collection(db, "class_links"), {
+        title: newResource.title.trim(),
+        url: newResource.url.trim(),
+        type: newResource.type,
+        targetGrade: newResource.targetGrade,
+        teacherId: currentUid, // Matches resource.data.teacherId == uid() for updates
+        teacherName: finalName,
+        createdAt: serverTimestamp(),
+        status: "active"
+      });
+
+      // Reset form on success
+      setNewResource({ ...newResource, title: "", url: "" });
+      alert("Resource added successfully!");
+
+    } catch (err: any) {
+      console.error("Firebase Permission Error:", err);
+      alert(`Permission Denied: Ensure you have published the latest rules in the Firebase Console and that your Project ID matches.`);
+    }
+    console.log("🔥 ATTEMPTING WRITE TO PROJECT:", db.app.options.projectId);
+  };
+
+  // DELETE: Permanent removal
+  const handleDeleteResource = async (id: string) => {
+    if (window.confirm("Permanently remove this link from student dashboards and audit history?")) {
+      try {
+        await deleteDoc(doc(db, "class_links", id));
+      } catch (err) {
+        console.error("Delete failed:", err);
+      }
+    }
+  };
+
+  // FILTER: Ensure the filter uses 'targetGrade' to match the database
+  const filteredResources = resources.filter(r =>
+    selectedGradeFilter === "all" ? true : r.targetGrade === selectedGradeFilter
+  );
+
+  useEffect(() => {
+    if (!user?.uid) return;
+
+    // This is the specific query for the Audit Trail
+    const q = query(
+      collection(db, "class_links"),
+      where("teacherId", "==", user.uid), // This matches the ID you saved in handleAddResource
+      orderBy("createdAt", "desc")
+    );
+
+
+    const unsub = onSnapshot(q, (snap) => {
+      const fetchedLinks = snap.docs.map(d => ({
+        id: d.id,
+        ...d.data()
+      }));
+
+      // This fills the 'resources' state which 'filteredResources' uses
+      setResources(fetchedLinks);
+    }, (error) => {
+      // If you see an error here about "indexes", click the link in the console
+      console.error("Audit Trail Fetch Error:", error);
+    });
+
+    return () => unsub();
+  }, [user?.uid]);
+
+  /* ======================================================
+     4. CHAT & MESSAGING LOGIC
+  ===================================================== */
+  useEffect(() => {
+    if (!user) return;
+    const qConv = query(collection(db, "conversations"), where("participants", "array-contains", user.uid));
+    const unsubConv = onSnapshot(qConv, (snap) => {
+      setConversations(snap.docs.map(d => ({ id: d.id, ...d.data() } as Conversation)));
+      setTotalUnread(snap.docs.length);
+    });
+    return () => unsubConv();
+  }, [user]);
+
+  useEffect(() => {
+    if (!activeConvId || !user) return;
+    const qMsgs = query(collection(db, "conversations", activeConvId, "messages"), orderBy("timestamp", "asc"));
+    return onSnapshot(qMsgs, (snap) => {
+      setMessages(snap.docs.map(d => ({ id: d.id, ...d.data() } as Message)));
+    });
+  }, [activeConvId, user]);
+
+  const startConversation = async (student: Student, subject: string) => {
+    if (!user) return;
+    const parentId = student.parentId || student.linkedParentId;
+    if (!parentId) return alert("Parent not found for this student.");
+
+    const convId = `${parentId}_${user.uid}_${student.id}`;
+    const existing = conversations.find(c => c.id === convId);
+
+    if (!existing) {
+      try {
+        await setDoc(doc(db, "conversations", convId), {
+          participants: [parentId, user.uid],
+          subject,
+          studentId: student.id,
+          createdAt: serverTimestamp(),
+          lastMessage: "Conversation initiated",
+          lastMessageTime: serverTimestamp(),
+        }, { merge: true });
+      } catch (err) {
+        console.error("Error starting conversation:", err);
+      }
+    }
+    setActiveConvId(convId);
+    setChatOpen(true);
+  };
+
+  const sendChatMessage = async () => {
+    if (!newMessage.trim() || !activeConvId || !user) return;
+    const text = newMessage.trim();
+    setNewMessage("");
+    const activeConv = conversations.find(c => c.id === activeConvId);
+    if (!activeConv) return;
+    const convRef = doc(db, "conversations", activeConvId);
+    await addDoc(collection(convRef, "messages"), {
+      text, sender: user.uid, timestamp: serverTimestamp()
+    });
+    await updateDoc(convRef, { lastMessage: text, lastMessageTime: serverTimestamp() });
+  };
+
+  /* ======================================================
+     5. PROFILE UPDATES
+  ===================================================== */
+  const handleSaveProfile = async () => {
+    if (!user) return;
+    const q = query(collection(db, "teacherApplications"), where("uid", "==", user.uid));
+    const snap = await getDocs(q);
+    if (!snap.empty) {
+      await updateDoc(doc(db, "teacherApplications", snap.docs[0].id), {
+        "personalInfo.phone": editProfile.phone,
+        "personalInfo.bio": editProfile.bio,
+        updatedAt: serverTimestamp(),
+      });
+      setIsEditingProfile(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!user) return;
+
+    // Real-time listener to the user's status
+    const unsub = onSnapshot(doc(db, "users", user.uid), (snap) => {
+      if (snap.exists()) {
+        setStatus(snap.data().applicationStatus);
+      }
+      setLoading(false);
+    });
+
+    return () => unsub();
+  }, [user]);
+
+  // EDIT TEACHER PROFILE
+
+  // Assuming:
+  // - user comes from useAuth / context
+  // - profile is your local state (useState)
+  // - setProfile is the setter
+  // - writeTimeout is a useRef<ReturnType<typeof setTimeout>>(null)
+  // ────────────────────────────────────────────────
+  // Unified Firestore Sync (Handles both Add & Remove)
+  // ────────────────────────────────────────────────
+
+
+  const updateTeacherFirestore = async (
+    operation: "add" | "remove",
+    subject: any
+  ) => {
+    if (!user?.uid || !applicationDocId) return;
+
+    const appRef = doc(db, "teacherApplications", applicationDocId);
+
+    const op =
+      operation === "add"
+        ? arrayUnion(subject)
+        : arrayRemove(subject);
+
+    try {
+      await updateDoc(appRef, {
+        "personalInfo.subjects": op,
+        updatedAt: serverTimestamp(),
+      });
+
+      console.log("✅ Subject add synced");
+    } catch (err) {
+      console.error("❌ Firestore Sync Error:", err);
+    }
+  };
+
+
+  // ────────────────────────────────────────────────
+  // Add Subject Handler
+  // ────────────────────────────────────────────────
+  const addSubject = async (subjectName: string) => {
+    if (!subjectName.trim() || !user?.uid) return;
+
+    // 1. Duplicate Check
+    const exists = profile?.subjects?.some(
+      (s: any) => s.name.toLowerCase() === subjectName.toLowerCase()
+    );
+    if (exists) {
+      alert("This subject is already in your profile.");
+      setSelectValue("");
+      return;
+    }
+
+    const newSubject = {
+      name: subjectName.trim(),
+      curriculum: "British Curriculum"
+    };
+
+    // 2. Clear UI immediately for responsiveness
+    setSelectValue("");
+
+    // 3. Trigger Firestore sync (onSnapshot will handle the UI update)
+    await updateTeacherFirestore("add", newSubject);
+  };
+
+  // ────────────────────────────────────────────────
+  // Remove Subject Handler
+  // ────────────────────────────────────────────────
+  const removeSubject = async (subjectName: string) => {
+    if (!profile?.subjects || !user?.uid) return;
+
+    const subjectToRemove = profile.subjects.find(
+      (s: any) => s.name === subjectName
+    );
+
+    if (subjectToRemove) {
+      await updateTeacherFirestore("remove", subjectToRemove);
+    }
+  };
+
+  // Helper to parse time strings like "08:00 AM" and calculate start/end Date objects
+  const parseTime = (timeStr: string) => {
+    // Handles "08:00 AM" or "08:00 AM - 09:00 AM"
+    const start = timeStr.split("-")[0].trim();
+    const [clock, meridian] = start.split(" ");
+    const [h, m] = clock.split(":").map(Number);
+
+    let hours = h;
+    if (meridian === "PM" && h !== 12) hours += 12;
+    if (meridian === "AM" && h === 12) hours = 0;
+
+    const startDate = new Date(now);
+    startDate.setHours(hours, m, 0, 0);
+
+    const endDate = new Date(startDate);
+    endDate.setMinutes(endDate.getMinutes() + 60); // default 1 hour
+
+    return { startDate, endDate };
+  };
+  const getLessonStatus = (day: string, time: string) => {
+    const todayName = now.toLocaleDateString("en-US", { weekday: "long" });
+
+    // Get numeric day index (0-6)
+    const dayIndexMap: Record<string, number> = {
+      Sunday: 0,
+      Monday: 1,
+      Tuesday: 2,
+      Wednesday: 3,
+      Thursday: 4,
+      Friday: 5,
+      Saturday: 6,
+    };
+
+    const todayIndex = now.getDay();
+    const lessonDayIndex = dayIndexMap[day];
+
+    // If lesson day is before today → finished
+    if (lessonDayIndex < todayIndex) return "finished";
+
+    // If lesson day is after today → upcoming
+    if (lessonDayIndex > todayIndex) return "upcoming";
+
+    // If same day → calculate time
+    const { startDate, endDate } = parseTime(time);
+
+    if (now > endDate) return "finished";
+    if (now >= startDate && now <= endDate) return "current";
+    return "upcoming";
+  };
+
+
+  // Mapping of lesson status to Tailwind CSS classes for dynamic styling
+  const statusStyles: Record<string, string> = {
+    finished: "bg-red-100 text-red-700 border-red-200",
+    current: "bg-green-100 text-green-700 border-green-200 animate-pulse",
+    upcoming: "bg-yellow-100 text-yellow-700 border-yellow-200"
+  };
+
+  // ORDER ARRANGEMENT
+  const dayOrder: Record<string, number> = {
+    Monday: 1,
+    Tuesday: 2,
+    Wednesday: 3,
+    Thursday: 4,
+  };
+
+  const getMinutes = (timeStr: string) => {
+    const [clock, meridian] = timeStr.split(" ");
+    let [hours, minutes] = clock.split(":").map(Number);
+
+    if (meridian === "PM" && hours !== 12) hours += 12;
+    if (meridian === "AM" && hours === 12) hours = 0;
+
+    return hours * 60 + minutes;
+  };
+
+
+  const sortedTimetable = [...timetable].sort((a, b) => {
+    const dayDiff = (dayOrder[a.day] || 99) - (dayOrder[b.day] || 99);
+    if (dayDiff !== 0) return dayDiff;
+
+    return getMinutes(a.time) - getMinutes(b.time);
+  });
+
+  const sortedResources = [...filteredResources].sort((a, b) => {
+    const aTime = a.updatedAt?.toMillis?.() ?? a.createdAt?.toMillis?.() ?? 0;
+    const bTime = b.updatedAt?.toMillis?.() ?? b.createdAt?.toMillis?.() ?? 0;
+    return bTime - aTime; // newest first
+  });
+
+
+  // DOWNLOAD FUNCTION
+  const handleDownloadTeacher = (teacher: any) => {
+    // Filter timetable specifically for this teacher only
+    const mySlots = timetable.filter(slot => slot.teacherUid === teacher.uid);
+    exportTimetablePDF(`${teacher.name} Timetable`, mySlots, false);
+  };
+
+  if (loading) return <div className="h-screen flex items-center justify-center"><Loader2 className="animate-spin text-indigo-600" /></div>;
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-indigo-50 to-purple-50 pb-20 font-sans">
+
+      {/* HEADER SECTION */}
+      <div className="bg-indigo-600 text-white shadow-xl">
+        <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-4">
+        {/* <div className="max-w-7xl mx-auto px-6 py-8 flex justify-between items-center"> */}
+          <div>
+            <h1 className="text-3xl font-black flex items-center gap-2 tracking-tight">
+              <img src={logo} alt="Logo" className="w-12 h-12" />
+              <Sparkles className="text-amber-400" /> TEACHER CENTRAL
+            </h1>
+            {teacherFullName && (
+              <p className="opacity-80 font-medium">
+                Educator: {teacherFullName}
+              </p>
+            )}
+
+
+          </div>
+          <Button
+            variant="secondary"
+            className="font-bold shadow-lg"
+            onClick={logoutAll}
+          >
+            <LogOut className="mr-2" /> Logout
+          </Button>
+        </div>
+      </div>
+
+      {/* New Feature Alert */}
+      <div className="bg-gradient-to-r from-yellow-50 to-amber-100 border-2 border-yellow-200 rounded-2xl p-6 shadow-lg">
+        <div className="flex items-center gap-4">
+          <div className="bg-yellow-100 p-3 rounded-xl">
+            <Sparkles className="w-8 h-8 text-yellow-600" />
+          </div>
+          <div>
+            <h3 className="text-2xl font-bold text-yellow-900">New Feature Alert!</h3>
+            <p className="text-lg text-yellow-800 mt-2">
+              We've added a PDF Audio Reader and Dictionary in the Student's Dashboard for easier learning. Encourage your students to use these tools to enhance their learning experience.
+            </p>
+          </div>
+        </div>
+      </div>
+
+
+
+
+      <div className="max-w-7xl mx-auto p-4 sm:p-6 lg:p-4 sm:p-6 lg:p-8">
+        <Tabs defaultValue="overview" className="space-y-8">
+          <TabsList className="bg-white p-1 rounded-2xl shadow-md border flex overflow-x-auto whitespace-nowrap">
+            <TabsTrigger value="overview" className="px-8 py-3 font-bold">Overview</TabsTrigger>
+            <TabsTrigger value="students" className="px-8 py-3 font-bold">Students</TabsTrigger>
+            <TabsTrigger value="links" className="px-8 py-3 font-bold">Link Engine</TabsTrigger>
+            <TabsTrigger value="timetable" className="px-8 py-3 font-bold">Timetable</TabsTrigger>
+            <TabsTrigger value="profile" className="px-8 py-3 font-bold">My Profile</TabsTrigger>
+
+          </TabsList>
+
+          {/* STATUS BANNER */}
+          {status === "submitted" && (
+            <div className="bg-amber-50 border-2 border-amber-200 p-6 rounded-[2rem] flex items-center gap-6 mb-8 animate-in slide-in-from-top-4">
+              <div className="w-12 h-12 bg-amber-500 rounded-2xl flex items-center justify-center text-white shadow-lg">
+                <Clock size={24} />
+              </div>
+              <div>
+                <h2 className="text-lg font-black text-amber-900 uppercase tracking-tight">Application Under Review</h2>
+                <p className="text-sm text-amber-700 font-medium">The Principal is currently verifying your credentials. Full portal access will unlock upon approval.</p>
+              </div>
+            </div>
+          )}
+
+          {/* DASHBOARD OVERVIEW */}
+          <TabsContent value="overview">
+
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 sm:p-6 lg:p-4 sm:p-6 lg:p-8">
+
+              <NextClassCountdownCard
+                userUid={teacher.uid}
+                role="teacher"
+              />
+
+              <Card className="bg-gradient-to-br from-indigo-500 to-purple-600 text-white border-0 shadow-2xl rounded-3xl overflow-hidden">
+                <CardHeader><CardTitle className="uppercase tracking-widest text-[10px] opacity-70">Schedule</CardTitle></CardHeader>
+                <CardContent>
+                  <p className="text-5xl font-black">{timetable.length}</p>
+                  <p className="text-sm mt-2 opacity-80">Classes assigned this week</p>
+                </CardContent>
+              </Card>
+              <Card className="bg-gradient-to-br from-emerald-500 to-teal-600 text-white border-0 shadow-2xl rounded-3xl overflow-hidden">
+                <CardHeader><CardTitle className="uppercase tracking-widest text-[10px] opacity-70">Enrolment</CardTitle></CardHeader>
+                <CardContent>
+                  <p className="text-5xl font-black">{students.length}</p>
+                  <p className="text-sm mt-2 opacity-80">Students across your subjects</p>
+                </CardContent>
+              </Card>
+            </div>
+          </TabsContent>
+
+          {/* STUDENT LIST */}
+          <TabsContent value="students">
+            <Card className="shadow-2xl border-0 rounded-[2rem] overflow-hidden">
+              <CardHeader className="bg-slate-900 text-white p-4 sm:p-6 lg:p-4 sm:p-6 lg:p-8">
+                <CardTitle className="flex items-center gap-3 text-2xl font-black">
+                  <Users className="text-indigo-400" /> STUDENT ROSTER
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="p-4 sm:p-6 lg:p-4 sm:p-6 lg:p-8">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {students.map(s => (
+                    <div key={s.id} className="group p-6 border-2 rounded-3xl bg-white shadow-sm hover:border-indigo-500 hover:shadow-xl transition-all duration-300">
+                      <div className="flex justify-between items-start mb-4">
+                        <div>
+                          <p className="font-black text-xl text-slate-800 leading-tight">{s.firstName} {s.lastName}</p>
+                          <Badge className="mt-2 bg-indigo-50 text-indigo-600 border-none font-bold">GRADE {s.grade}</Badge>
+                        </div>
+                        <Button size="icon" className="rounded-full bg-slate-100 text-slate-600 hover:bg-indigo-600 hover:text-white" onClick={() => startConversation(s, s.subjects[0])}>
+                          <MessageCircle size={20} />
+                        </Button>
+                      </div>
+                      <p className="text-xs font-bold text-slate-400 uppercase tracking-tighter">Subjects: {s.subjects.join(", ")}</p>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* DOWNLOAD PDF BUTTON */}
+      <TimetableExportManager
+        timetableData={allTimetable}   // ← full school data
+        lockedTeacherUid={teacher.uid}
+        lockedTeacherName={teacher.teacherName}
+      />
+
+          <MoodleCard />
+
+          {/* LINK ENGINE TAB */}
+          <TabsContent value="links">
+            <div className="space-y-6">
+
+              {/* PUBLISHING ENGINE */}
+              <Card className="border-0 shadow-2xl bg-indigo-900 text-white rounded-[2rem] overflow-hidden">
+                <div className="p-4 sm:p-6 lg:p-4 sm:p-6 lg:p-8 border-b border-white/10 bg-white/5 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                  <div>
+                    <h2 className="text-2xl font-black italic tracking-tighter">LINK PUBLISHING ENGINE</h2>
+                    <p className="text-xs text-indigo-300 font-bold uppercase tracking-widest mt-1">Updates Student Dashboards instantly</p>
+                  </div>
+                  <div className="bg-white/10 p-2 rounded-xl border border-white/20">
+                    <Label className="text-[10px] font-black uppercase text-indigo-200 block mb-1">Filter Audit Trail</Label>
+                    <select
+                      className="bg-transparent text-xs font-bold outline-none cursor-pointer text-white"
+                      value={selectedGradeFilter}
+                      onChange={(e) => setSelectedGradeFilter(e.target.value)}
+                    >
+                      <option className="text-black" value="all">View All Grades</option>
+                      {availableGrades.map(g => <option className="text-black" key={g} value={g}>{g}</option>)}
+                    </select>
+                  </div>
+                </div>
+                <CardContent className="p-4 sm:p-6 lg:p-4 sm:p-6 lg:p-8">
+                  <div className="grid grid-cols-1 md:grid-cols-5 gap-6 items-end">
+                    <div className="space-y-2">
+                      <Label className="text-[10px] uppercase font-black text-indigo-200">Target Grade</Label>
+                      <select
+                        className="w-full h-12 px-4 rounded-xl bg-white/10 border-2 border-white/10 text-white text-sm font-bold focus:border-white/40 transition-all outline-none"
+                        value={newResource.targetGrade}
+                        onChange={e => setNewResource({ ...newResource, targetGrade: e.target.value })}
+                      >
+                        <option className="text-black" value="all">All Grades</option>
+                        {availableGrades.map(g => <option className="text-black" key={g} value={g}>{g}</option>)}
+                      </select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-[10px] uppercase font-black text-indigo-200">Link Title</Label>
+                      <Input className="h-12 bg-white/10 border-2 border-white/10 text-white placeholder:text-white/30 rounded-xl focus:border-white/40 font-bold" placeholder="e.g. Maths Live Session" value={newResource.title} onChange={e => setNewResource({ ...newResource, title: e.target.value })} />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-[10px] uppercase font-black text-indigo-200">URL / Zoom Link</Label>
+                      <Input className="h-12 bg-white/10 border-2 border-white/10 text-white placeholder:text-white/30 rounded-xl focus:border-white/40 font-mono text-xs" placeholder="https://zoom.us/..." value={newResource.url} onChange={e => setNewResource({ ...newResource, url: e.target.value })} />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-[10px] uppercase font-black text-indigo-200">Category</Label>
+                      <select
+                        className="w-full h-12 px-4 rounded-xl bg-white/10 border-2 border-white/10 text-white text-sm font-bold focus:border-white/40 outline-none"
+                        value={newResource.type}
+                        onChange={e => setNewResource({ ...newResource, type: e.target.value })}
+                      >
+                        <option className="text-black" value="classroom">Classroom / Live</option>
+                        <option className="text-black" value="resource">Study Material</option>
+                      </select>
+                    </div>
+                    <Button onClick={handleAddResource} className="h-12 bg-amber-400 hover:bg-amber-500 text-black font-black rounded-xl shadow-xl transition-transform active:scale-95">
+                      <PlusCircle className="mr-2 h-5 w-5" /> PUBLISH LINK
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* AUDIT TRAIL / MANAGEMENT TABLE */}
+              <div className="bg-white rounded-[2rem] shadow-2xl border-0 overflow-hidden">
+                <div className="p-4 sm:p-6 lg:p-4 sm:p-6 lg:p-8 border-b bg-slate-50 flex justify-between items-center">
+                  <h3 className="font-black text-slate-800 text-xl tracking-tight uppercase">Audit Trail & Record Management</h3>
+                  <Badge className="px-4 py-1 rounded-full font-black bg-indigo-100 text-indigo-600 border-none">{filteredResources.length} RECORDS ACTIVE</Badge>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="bg-slate-100/50 text-[10px] uppercase font-black text-slate-400 tracking-widest">
+                        <th className="px-8 py-5">Audience</th>
+                        <th className="px-8 py-5">Content Details</th>
+                        <th className="px-8 py-5">Navigation</th>
+                        <th className="px-8 py-5">Published</th>
+                        <th className="px-8 py-5 text-right">Settings</th>
+                      </tr>
+                    </thead>
+
+
+
+                    <tbody className="divide-y divide-slate-100">
+                      {sortedResources.map((item, index) => {
+                        const isEditing = editingResourceId === item.id;
+
+                        return (
+                          <tr key={item.id} className="hover:bg-slate-50/50 transition-colors group">
+
+                            {/* Audience */}
+                            <td className="px-8 py-6">
+                              <Badge variant="outline" className="font-black text-[10px] border-slate-200 text-slate-500 uppercase">
+                                Grade {item.targetGrade}
+                              </Badge>
+                            </td>
+
+                            {/* Content */}
+                            <td className="px-8 py-6">
+                              <p className="font-black text-slate-800 text-base">
+                                {item.title}
+                              </p>
+                            </td>
+
+                            {/* Navigation */}
+                            <td className="px-8 py-6">
+                              <button
+                                onClick={async () => {
+                                  try {
+                                    // 🔥 Save attendance audit
+                                    await addDoc(
+                                      collection(db, "class_links", item.id, "auditTrail"),
+                                      {
+                                        studentId: userUid,
+                                        studentName: userData?.name || "",
+                                        grade: userData?.grade || "",
+                                        subject: item.subject || "general",
+                                        linkTitle: item.title || "",
+                                        linkType: item.type || "resource",
+                                        url: item.url || "",
+                                        clickedAt: serverTimestamp(),
+                                      }
+                                    );
+
+                                  } catch (error) {
+                                    console.error("Attendance log failed:", error);
+                                  }
+
+                                  // 🚀 Open Zoom / link
+                                  const destination = item.url.startsWith("http")
+                                    ? item.url
+                                    : `https://${item.url}`;
+
+                                  window.open(destination, "_blank");
+                                }}
+                                className="text-[11px] text-indigo-600 font-mono truncate max-w-[150px] hover:underline"
+                              >
+                                {item.url}
+                              </button>
+                            </td>
+
+                            {/* 🔥 Published Timestamp */}
+                            <td className="px-8 py-6">
+                              <span className="text-[11px] font-semibold text-slate-600">
+                                {formatTimestamp(item.updatedAt || item.createdAt)}
+                              </span>
+
+                              {index === 0 && (
+                                <div className="text-[9px] font-black text-emerald-600 uppercase mt-1">
+                                  ● Most Recent
+                                </div>
+                              )}
+                            </td>
+
+
+
+                            {/* Settings */}
+                            <td className="px-8 py-6 text-right hover:visible color-red-400">
+                              <button
+                                onClick={() => openAuditModal(item)}
+                                className="text-indigo-600 hover:text-indigo-800 font-semibold mr-4"
+                              >
+                                View Attendance
+                              </button>
+
+                              <button onClick={() => handleDeleteResource(item.id)} className="text-red-500 hover:text-blue-700">
+                                Delete
+                              </button>
+
+                            </td>
+
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+
+
+                  </table>
+                  {filteredResources.length === 0 && (
+                    <div className="py-20 text-center flex flex-col items-center">
+                      <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-4">
+                        <BookOpen className="text-slate-300 w-8 h-8" />
+                      </div>
+                      <p className="text-slate-400 font-bold uppercase tracking-widest text-[10px]">No link records found in audit trail</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </TabsContent>
+
+          {/* TIMETABLE VIEW */}
+          <TabsContent value="timetable">
+            <Card className="shadow-2xl overflow-hidden border-0 rounded-[2rem]">
+              <table className="w-full text-left">
+                <thead className="bg-slate-900 text-white">
+                  <tr className="uppercase text-[10px] tracking-widest font-black">
+                    <th className="px-8 py-6">Day</th>
+                    <th className="px-8 py-6">Time Slot</th>
+                    <th className="px-8 py-6">Subject Area</th>
+                    <th className="px-8 py-6">Student Grade</th>
+                  </tr>
+                </thead>
+
+
+                <tbody className="divide-y divide-slate-100">
+                  {sortedTimetable.map(t => (
+                    <tr key={t.id} className="hover:bg-slate-50 transition-colors">
+                      <td className="px-8 py-6 font-black text-slate-700">{t.day}</td>
+                      <td className="px-8 py-6 font-medium text-slate-500">{t.time}</td>
+                      <td className="px-8 py-6 flex items-center gap-2">
+                        <Badge className="bg-indigo-100 text-indigo-700 border-none font-black">
+                          {t.subject}
+                        </Badge>
+
+                        {(() => {
+                          const status = getLessonStatus(t.day, t.time);
+
+                          return (
+                            <Badge className={statusStyles[status]}>
+                              {status.charAt(0).toUpperCase() + status.slice(1)}
+                            </Badge>
+                          );
+                        })()}
+                      </td>
+
+                      <td className="px-8 py-6 font-bold text-slate-400">GRADE {t.grade}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </Card>
+          </TabsContent>
+
+          {/* TEACHER PROFILE */}
+          <TabsContent value="profile">
+            <Card className="shadow-2xl border-0 rounded-[2rem] overflow-hidden">
+              <CardHeader className="flex flex-row justify-between items-center bg-indigo-50 p-4 sm:p-6 lg:p-4 sm:p-6 lg:p-8">
+                <CardTitle className="text-2xl font-black text-indigo-900">IDENTITY PROFILE</CardTitle>
+                {!isEditingProfile ? (
+                  <Button onClick={() => setIsEditingProfile(true)} className="rounded-xl shadow-lg font-bold"><Edit2 size={16} className="mr-2" /> EDIT BIO</Button>
+                ) : (
+                  <div className="flex gap-2">
+                    <Button onClick={handleSaveProfile} className="bg-emerald-600 hover:bg-emerald-700 rounded-xl shadow-lg font-bold"><Save size={16} className="mr-2" /> SAVE CHANGES</Button>
+                    <Button onClick={() => setIsEditingProfile(false)} variant="ghost" className="font-bold">CANCEL</Button>
+                  </div>
+                )}
+              </CardHeader>
+              <CardContent className="p-10 space-y-10">
+                <div className="grid md:grid-cols-2 gap-4 sm:p-6 lg:p-4 sm:p-6 lg:p-8">
+                  <div className="space-y-2"><Label className="font-black text-[10px] text-slate-400 uppercase">First Name</Label><Input className="h-12 rounded-xl bg-slate-50 border-none font-bold text-slate-900" value={profile?.firstName} disabled /></div>
+                  <div className="space-y-2"><Label className="font-black text-[10px] text-slate-400 uppercase">Last Name</Label><Input className="h-12 rounded-xl bg-slate-50 border-none font-bold text-slate-900" value={profile?.lastName} disabled /></div>
+                  <div className="space-y-2"><Label className="font-black text-[10px] text-slate-400 uppercase">Registered Email</Label><Input className="h-12 rounded-xl bg-slate-50 border-none font-bold text-slate-900" value={profile?.email} disabled /></div>
+                  <div className="space-y-2">
+                    <Label className="font-black text-[10px] text-slate-400 uppercase">Contact Number</Label>
+                    <Input className={`h-12 rounded-xl border-2 font-bold ${isEditingProfile ? 'border-indigo-200' : 'bg-slate-50 border-none text-slate-900'}`} value={isEditingProfile ? editProfile.phone : profile?.phone} disabled={!isEditingProfile} onChange={e => setEditProfile({ ...editProfile, phone: e.target.value })} />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label className="font-black text-[10px] text-slate-400 uppercase">Professional Biography</Label>
+                  <Textarea className={`rounded-2xl border-2 font-medium leading-relaxed ${isEditingProfile ? 'border-indigo-200' : 'bg-slate-50 border-none text-slate-900'}`} rows={5} value={isEditingProfile ? editProfile.bio : profile?.bio} disabled={!isEditingProfile} onChange={e => setEditProfile({ ...editProfile, bio: e.target.value })} />
+                </div>
+
+                {/* SUBJECTS IN PROFILE */}
+                <div className="pt-6 border-t">
+                  <Label className="font-black text-[10px] text-slate-400 uppercase mb-4 block flex items-center gap-2">
+                    Manage Specializations
+                    {/* Optional: Add a subtle loading indicator if you have a saving state */}
+                  </Label>
+
+                  <div className="mb-6">
+                    <Select
+                      value={selectValue}
+                      onValueChange={addSubject}
+                    >
+                      <SelectTrigger className="w-full h-12 rounded-xl bg-slate-50 border-none font-bold">
+                        <SelectValue placeholder="Add a new subject..." />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <div className="max-h-[300px] overflow-y-auto">
+                          {British_Curriculum_SUBJECTS.map((sub) => (
+                            <SelectItem key={sub} value={sub}>{sub}</SelectItem>
+                          ))}
+                        </div>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="flex flex-wrap gap-3 items-start">
+                    {profile?.subjects && profile.subjects.length > 0 ? (
+                      profile.subjects.map((sub: any, i: number) => (
+                        <Badge
+                          key={`${sub.name}-${i}`}
+                          className="py-2 pl-6 pr-3 rounded-full bg-slate-900 text-white font-bold flex items-center gap-2 animate-in fade-in zoom-in duration-200"
+                        >
+                          {sub.name}
+                          <button
+                            onClick={() => removeSubject(sub.name)}
+                            className="ml-1 p-1 hover:bg-rose-500 rounded-full transition-colors"
+                            type="button"
+                          >
+                            <X size={14} className="text-slate-400 group-hover:text-white" />
+                          </button>
+                        </Badge>
+                      ))
+                    ) : (
+                      <p className="text-xs text-slate-400 italic">No specializations added yet.</p>
+                    )}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+        </Tabs>
+      </div>
+
+      {/* CHAT WIDGET (DYNAMIC OVERLAY) */}
+      <div className="fixed bottom-8 right-8 z-50 flex flex-col items-end">
+        {chatOpen && (
+          <div className="mb-6 w-[400px] h-[600px] bg-white rounded-[2rem] shadow-[0_35px_60px_-15px_rgba(0,0,0,0.3)] border-0 flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="p-6 bg-slate-900 text-white flex justify-between items-center">
+              <div>
+                <span className="font-black uppercase tracking-widest text-[10px] block opacity-50">Communication</span>
+                <span className="text-lg font-bold">{activeConvId ? "Active Message" : "Inbox"}</span>
+              </div>
+              <button className="bg-white/10 p-2 rounded-full hover:bg-white/20 transition" onClick={() => { setChatOpen(false); setActiveConvId(null); }}><X size={20} /></button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto bg-slate-50 p-6 space-y-4">
+              {activeConvId ? (
+                messages.map(m => (
+                  <div key={m.id} className={`flex ${m.sender === user?.uid ? "justify-end" : "justify-start"}`}>
+                    <div className={`max-w-[85%] p-4 rounded-3xl text-sm font-medium shadow-sm ${m.sender === user?.uid ? "bg-indigo-600 text-white rounded-br-none" : "bg-white text-slate-800 rounded-bl-none border border-slate-100"}`}>
+                      {m.text}
+                    </div>
+                  </div>
+                ))
+              ) : (
+                conversations.map(c => (
+                  <div key={c.id} onClick={() => setActiveConvId(c.id)} className="p-5 border-2 rounded-3xl bg-white cursor-pointer hover:border-indigo-500 transition shadow-sm group">
+                    <p className="font-black text-slate-800 group-hover:text-indigo-600 transition-colors">{c.subject}</p>
+                    <p className="text-xs text-slate-400 mt-1 truncate font-bold uppercase">{c.lastMessage}</p>
+                  </div>
+                ))
+              )}
+              <div ref={scrollRef} />
+            </div>
+
+            {activeConvId && (
+              <div className="p-6 border-t bg-white flex gap-3">
+                <Input className="h-12 bg-slate-50 border-none rounded-xl font-medium" placeholder="Message parent..." value={newMessage} onChange={e => setNewMessage(e.target.value)} onKeyDown={e => e.key === 'Enter' && sendChatMessage()} />
+                <Button className="h-12 w-12 rounded-xl bg-indigo-600 shadow-lg" onClick={sendChatMessage}><Send size={20} /></Button>
+              </div>
+            )}
+          </div>
+        )}
+        <button onClick={() => setChatOpen(!chatOpen)} className="bg-indigo-600 text-white p-6 rounded-[2rem] shadow-2xl relative hover:scale-105 active:scale-95 transition-all duration-300">
+          <MessageCircle size={32} />
+          {totalUnread > 0 && <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] w-7 h-7 rounded-full flex items-center justify-center border-4 border-white font-black">{totalUnread}</span>}
+        </button>
+      </div>
+
+      {/* Audit Trail Modal */}
+      {selectedResource && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white rounded-3xl p-4 sm:p-6 lg:p-4 sm:p-6 lg:p-4 sm:p-6 lg:p-8 w-[700px] max-h-[80vh] overflow-y-auto shadow-2xl">
+
+            <h2 className="text-xl font-black mb-6 uppercase">
+              Attendance Trail – {selectedResource.title}
+            </h2>
+
+            {auditLogs.length > 0 ? (
+              <table className="w-full text-sm">
+                <thead className="text-left border-b">
+                  <tr>
+                    <th className="py-2">Student</th>
+                    <th>Grade</th>
+                    <th>Subject</th>
+                    <th>Clicked At</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {auditLogs.map(log => (
+                    <tr key={log.id} className="border-b hover:bg-slate-50">
+                      <td className="py-2 font-semibold">
+                        {log.studentName}
+                      </td>
+                      <td>{log.grade}</td>
+                      <td>{log.subject}</td>
+                      <td>
+                        {log.clickedAt
+                          ? formatTimestamp(log.clickedAt)
+                          : "Loading..."}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p className="text-slate-400 text-sm">
+                No attendance records yet.
+              </p>
+            )}
+
+            <div className="text-right mt-6">
+              <button
+                onClick={() => setSelectedResource(null)}
+                className="bg-slate-900 text-white px-6 py-2 rounded-xl"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+
+    </div>
+  );
+};
+export default TeacherDashboard;
