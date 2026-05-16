@@ -55,13 +55,13 @@ import { Textarea } from "@/components/ui/textarea";
 import { Settings } from "lucide-react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import PendingInvoiceModal from "./PendingInvoiceModal";
-import logo from "@/img/care.png";
+import logo from "@/img/bateleur1.png";
 import { ReviewModal } from "@/lib/ReviewModal";
 
 /* ======================================================
    CONSTANTS & TYPES
 ====================================================== */
-const SCHOOL_NAME = "Care Academy";
+const SCHOOL_NAME = "Bateleur Online";
 
 interface Student {
   // 🔑 Identity
