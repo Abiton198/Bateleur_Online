@@ -428,7 +428,7 @@ export default function LoginForm() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">
       <Card className="w-full max-w-md rounded-[2rem] shadow-2xl overflow-hidden border-none bg-white">
-        <CardHeader className="relative bg-indigo-600 text-white text-center py-10">
+        <CardHeader className="relative bg-[#E7AA42] text-white text-center py-10">
           <button
             onClick={() => (window.location.href = "/")}
             className="absolute top-5 right-5 p-2 rounded-full bg-white/10 hover:bg-white/20"
@@ -456,7 +456,7 @@ export default function LoginForm() {
             </TabsList>
 
             {/* Sign In Tab */}
-            <TabsContent value="signin" className="space-y-4">
+            <TabsContent value="signin" className="space-y-4 ">
               <Input
                 type="email"
                 placeholder="Email Address"

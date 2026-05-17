@@ -174,20 +174,20 @@ const LandingPage: React.FC = () => {
                             <div className="flex flex-wrap gap-6">
 
                                 <button
-                                    onClick={() => navigate("/about/enrolment")}
+                                    onClick={() => navigate("/login")}
                                     className="bg-[#173641] hover:bg-[#102A31] text-white px-10 py-5 rounded-2xl font-bold text-lg shadow-xl flex items-center gap-3 transition hover:scale-[1.02]"
                                 >
                                     Enrol Your Child Today
                                     <ArrowRight size={22} />
                                 </button>
 
-                                <button
+                                {/* <button
                                     onClick={() => navigate("/about")}
                                     className="border-2 border-[#173641] text-[#173641] hover:bg-[#173641] hover:text-white px-10 py-5 rounded-2xl font-bold text-lg transition flex items-center gap-3"
                                 >
                                     Learn More
                                     <ArrowRight size={22} />
-                                </button>
+                                </button> */}
                             </div>
                         </div>
 
