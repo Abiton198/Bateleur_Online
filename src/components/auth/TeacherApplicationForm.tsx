@@ -64,6 +64,8 @@ interface TeacherApplicationFormProps {
   showCancelButton?: boolean;
   showEditButton?: boolean;
   showDeleteButton?: boolean;
+  onClose?: () => void;
+  onSubmitted?: () => void; // New callback for successful submission
 
 }
 
@@ -128,6 +130,8 @@ const British_Curriculum_SUBJECTS = [
 export default function TeacherApplicationForm({
   applicationId,
   userId,
+  onClose,
+  onSubmitted,
 
 }: TeacherApplicationFormProps) {
 
@@ -265,14 +269,16 @@ export default function TeacherApplicationForm({
       console.log("Submission successful!");
 
       // 6. Trigger Navigation
-      setTimeout(() => {
-        if (onSubmitted) {
-          onSubmitted();
-        } else {
-          console.warn("onSubmitted prop is missing!");
-          onClose(); // Fallback
-        }
-      }, 2000);
+    // ✅ AFTER — safe fallback, no crash
+        setTimeout(() => {
+          if (onSubmitted) {
+            onSubmitted();
+          } else if (onClose) {
+            onClose();
+          } else {
+            console.warn("Neither onSubmitted nor onClose prop was provided.");
+          }
+        }, 2000);
 
     } catch (err: any) {
       console.error("Full Submission Error:", err);

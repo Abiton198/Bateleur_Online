@@ -37,7 +37,7 @@ import AudioPDFReader from "@/lib/AudioPDFReader";
 import FlashCardComponent from "@/components/FlashCard";
 import { flashCards } from "@/lib/flashcards";
 
-import logo from "@/img/care.png";
+import logo from "@/img/bateleur1.png";
 
 // =============================================================================
 // TYPES

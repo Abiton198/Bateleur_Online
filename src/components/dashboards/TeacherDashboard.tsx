@@ -53,7 +53,7 @@ import {
 } from "@/components/ui/select";
 // 1. Unified Firestore Sync Function (Using setDoc to prevent "Missing Document" errors)
 import { arrayUnion, arrayRemove } from "firebase/firestore";
-import logo from "@/img/care.png";
+import logo from "@/img/bateleur1.png";
 
 
 

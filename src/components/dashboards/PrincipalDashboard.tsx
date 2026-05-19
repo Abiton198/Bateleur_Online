@@ -44,7 +44,7 @@ import StudentLockButton from "@/lib/StudentLockButton";
 // import { BulkDeleteTool } from "@/lib/BulkDeleteTool";
 import TeacherLessonStatsCard from "@/lib/TeacherLessonStatsCard";
 import { createProfile } from "@/lib/createTempTeacher";
-import logo from "@/img/care.png";
+import logo from "@/img/bateleur1.png";
 
 
 const British_Curriculum_SUBJECTS = {
